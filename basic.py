@@ -1,6 +1,7 @@
 from string_with_arrows import string_with_arrows
 TT_INT = 'INT'
 TT_FLOAT = 'FLOAT'
+TT_STRING = 'STRING'
 TT_PLUS = 'PLUS'
 TT_MINUS = 'MINUS'
 TT_MUL = 'MUL'
@@ -25,6 +26,7 @@ TT_LBRACE = 'LBRACE'
 TT_RBRACE = 'RBRACE'
 TT_COLON = 'COLON'
 TT_COMMA = 'COMMA'
+TT_INDEX = 'INDEX'
 DIGITS = '0123456789'
 LETTERS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
 OP = [
@@ -227,6 +229,13 @@ class Lexer:
             elif self.current_char == '}':
                 tokens.append(Token(TT_RBRACE,pos_start=self.pos))
                 self.advance()
+            elif self.current_char == ':':
+                tokens.append(Token(TT_INDEX,pos_start=self.pos))
+                self.advance()
+            elif self.current_char == '"':
+                tokens.append(self.make_string())
+            elif self.current_char == "'":
+                tokens.append(self.make_string())
             else:
                 pos_start = self.pos.copy()
                 char = self.current_char
@@ -290,7 +299,35 @@ class Lexer:
             self.advance()
             tok_type = TT_GTE
         return Token(tok_type, pos_start=pos_start, pos_end=self.pos)
+    def make_string(self):
+        string_value = ''
+        pos_start = self.pos.copy()
+        escape_char = False
+        self.advance()
+        escape_chars = {
+            'n': '\n',
+            't': '\t'
+        }
+        while self.current_char != None and ((self.current_char != '"' and self.current_char != "'") or escape_char):
+            if escape_char:
+                string_value += escape_chars.get(self.current_char, self.current_char)
+            else:
+                if self.current_char == '#':
+                    escape_char = True
+                else:
+                    string_value += self.current_char
+            self.advance()
+            escape_char = False
+        self.advance()
+        return Token(TT_STRING, string_value, pos_start, self.pos)
 class NumberNode:
+    def __init__(self,tok):
+        self.tok = tok
+        self.pos_start = self.tok.pos_start
+        self.pos_end = self.tok.pos_end
+    def __repr__(self):
+        return f'{self.tok}'
+class StringNode:
     def __init__(self,tok):
         self.tok = tok
         self.pos_start = self.tok.pos_start
@@ -634,6 +671,9 @@ class Parser:
         if tok.type in (TT_INT,TT_FLOAT):
             res.register(self.advance())
             return res.success(NumberNode(tok))
+        elif tok.type == TT_STRING:
+            res.register(self.advance())
+            return res.success(StringNode(tok))
         elif tok.type == TT_IDENTIFIER:
             res.register(self.advance())
             return res.success(VarAccessNode(tok))
@@ -668,7 +708,7 @@ class Parser:
             tok.pos_start,tok.pos_end,'Expecting integer or float.'
         ))
     def power(self):
-        return self.bin_op(self.call,(TT_POW,),self.factor)
+        return self.bin_op(self.call,(TT_POW,TT_INDEX),self.factor)
     def call(self):
         res = ParserResult()
         node = res.register(self.atom())
@@ -784,7 +824,7 @@ class Parser:
         res = ParserResult()
         left = res.register(func())
         if res.error: return res
-        while self.current_tok.type in ops or (self.current_tok.type,self.current_tok.value) in ops:
+        while self.current_tok.type in ops or (self.current_tok.type == TT_KEYWORD and self.current_tok.value in ops):
             op_tok = self.current_tok
             res.register(self.advance())
             right = res.register(factor())
@@ -830,6 +870,7 @@ class Value:
     def get_comparison_lte(self,other):return None,self.execute()
     def get_comparison_gt(self,other):return None,self.execute()
     def get_comparison_gte(self,other):return None,self.execute()
+    def get_index(self,index):return None,self.execute()
     def execute(self):
         return RTError(
             self.pos_start,self.pos_end,'Can not execute this.',self.context
@@ -888,6 +929,29 @@ class Number(Value):
         return self.value != 0
     def __repr__(self):
         return str(self.value)
+class String(Value):
+    def __init__(self,value):
+        super().__init__()
+        self.value = value
+    def added_to(self, other):
+        if isinstance(other,String):
+            return String(self.value + other.value).set_context(self.context).set_pos(self.pos_start,other.pos_end),None
+        else:
+            return None,self.execute()
+    def multiplied_by(self,other):
+        if isinstance(other,Number):
+            return String(self.value * other.value).set_context(self.context).set_pos(self.pos_start,other.pos_end),None
+        else:
+            return None,self.execute()
+    def if_true(self):
+        return len(self.value) > 0
+    def __repr__(self):
+        return self.value
+    def get_index(self, index):
+        if isinstance(index,Number):
+            return String(self.value[index.value]).set_context(self.context).set_pos(self.pos_start,self.pos_end),None
+        else:
+            return None,self.execute()
 class Function(Value):
     def __init__(self,name,body_node,arg_names):
         self.name = name or "<anonymous>"
@@ -950,6 +1014,8 @@ class Interpreter:
         raise Exception(f'No visit_{type(node).__name__} method defined')
     def visit_NumberNode(self,node, context):
         return RTResult().success(Number(node.tok.value).set_context(context).set_pos(node.pos_start,node.pos_end))
+    def visit_StringNode(self,node, context):
+        return RTResult().success(String(node.tok.value).set_context(context).set_pos(node.pos_start,node.pos_end))
     def visit_VarAccessNode(self,node,context):
         res = RTResult()
         var_name = node.var_name_tok.value
@@ -999,6 +1065,8 @@ class Interpreter:
             result,error =  left.divded_by(right)
         elif node.op_tok.type == TT_POW:
             result,error =  left.powed_by(right)
+        elif node.op_tok.type == TT_INDEX:
+            result,error =  left.get_index(right)
         elif node.op_tok.type == TT_EE:
             result,error = left.get_comparison_eq(right)
         elif node.op_tok.type == TT_NE:
